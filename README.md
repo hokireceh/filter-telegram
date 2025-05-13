@@ -10,3 +10,21 @@
 - 🖥️ Beli VPS: [VPS Here](https://bit.ly/vps-here)
 
 ---
+## 🛠️ Cara Instalasi
+
+1. **Clone repo ini dulu:**
+   ```bash
+   git clone https://github.com/hokireceh/filter-telegram.git
+   cd filter-telegram
+   ```
+
+2. **Install dependencies:**
+   ```bash
+   npm install
+   ```
+
+3. **Buka file `.env`  .
+
+4. **Jalankan bot-nya:**
+   ```bash
+   node index.js
