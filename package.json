@@ -1,0 +1,23 @@
+{
+  "name": "telegram-multifilter-bot",
+  "version": "1.0.0",
+  "description": "Bot Telegram dengan multi-admin, penyimpanan JSON, dan sistem filter",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "keywords": [
+    "telegram",
+    "bot",
+    "filter",
+    "multi-admin"
+  ],
+  "author": "HokiReceh",
+  "license": "MIT",
+  "dependencies": {
+    "telegraf": "^4.12.2",
+    "axios": "^1.4.0",
+    "uuid": "^9.0.0",
+    "dotenv": "^16.0.3"
+  }
+}
