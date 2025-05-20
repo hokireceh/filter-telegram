@@ -81,13 +81,19 @@ async function unduhFile(fileUrl, filePath) {
 
 // Fungsi bantuan untuk mengekstrak media dari pesan
 async function ekstrakMediaDariPesan(ctx) {
+  // Pastikan ctx dan ctx.message ada
+  if (!ctx || !ctx.message) {
+    console.log('Konteks atau pesan tidak ada');
+    return null;
+  }
+
   let mediaObj = null;
   let mediaId = null;
   let fileType = null;
   let fileUrl = null;
 
   // Periksa berbagai jenis media
-  if (ctx.message.photo) {
+  if (ctx.message.photo && ctx.message.photo.length > 0) {
     const photo = ctx.message.photo[ctx.message.photo.length - 1];
     mediaObj = photo;
     mediaId = photo.file_id;
@@ -154,7 +160,7 @@ bot.use((ctx, next) => {
 
   const userId = ctx.from.id.toString();
   const isGroup = ctx.chat.type === 'group' || ctx.chat.type === 'supergroup';
-
+  
   // Jika di grup, hanya respon ke admin bot
   if (isGroup) {
     if (config.admins.includes(userId)) {
@@ -163,12 +169,12 @@ bot.use((ctx, next) => {
     // Jika bukan admin, abaikan pesan (diam)
     return;
   }
-
+  
   // Jika chat pribadi, verifikasi admin
   if (config.admins.includes(userId)) {
     return next();
   }
-
+  
   return ctx.reply('🚫 Maaf, hanya admin yang dapat menggunakan bot ini.');
 });
 
@@ -272,7 +278,12 @@ bot.hears(/^!add (.+)$|^!a (.+)$/, async (ctx) => {
   if (replyMsg.photo || replyMsg.video || replyMsg.document || 
       replyMsg.animation || replyMsg.voice || replyMsg.audio) {
     try {
-      const mediaInfo = await ekstrakMediaDariPesan(replyMsg);
+      // Perbaikan: Ekstrak media langsung dari ctx.message.reply_to_message
+      const mediaInfo = await ekstrakMediaDariPesan({
+        message: replyMsg,
+        telegram: ctx.telegram
+      });
+      
       if (mediaInfo) {
         content.media.push(mediaInfo);
         db.media[mediaInfo.uuid] = mediaInfo;
@@ -324,8 +335,13 @@ bot.hears(/^!del (.+)$|^!d (.+)$/, async (ctx) => {
 
 // Handler untuk tombol konfirmasi
 bot.action(/^del_confirm_(.+)_(\d+)$/, async (ctx) => {
-  const [keyword, originalMsgId] = ctx.match[1].split('_');
-
+  const parts = ctx.match[1].split('_');
+  // Perbaikan: handling untuk keyword yang mungkin mengandung underscore
+  if (parts.length < 2) return ctx.reply('Invalid format');
+  
+  const msgId = parts.pop(); // Ambil ID pesan (elemen terakhir)
+  const keyword = parts.join('_'); // Gabungkan sisanya sebagai keyword
+  
   if (db.filters[keyword]) {
     // Hapus file media terkait
     if (db.filters[keyword].media && db.filters[keyword].media.length > 0) {
@@ -347,15 +363,15 @@ bot.action(/^del_confirm_(.+)_(\d+)$/, async (ctx) => {
     // Hapus filter
     delete db.filters[keyword];
     simpanDatabase();
-
+    
     // Update pesan konfirmasi
     await ctx.editMessageText(`✅ Filter "${keyword}" telah dihapus.`);
-
+    
     // Hapus pesan original setelah 3 detik
     setTimeout(async () => {
       try {
         await ctx.deleteMessage();
-        await ctx.telegram.deleteMessage(ctx.chat.id, originalMsgId);
+        await ctx.telegram.deleteMessage(ctx.chat.id, msgId);
       } catch (error) {
         console.error('Error menghapus pesan:', error);
       }
@@ -365,16 +381,21 @@ bot.action(/^del_confirm_(.+)_(\d+)$/, async (ctx) => {
 
 // Handler untuk tombol batalkan
 bot.action(/^del_cancel_(.+)_(\d+)$/, async (ctx) => {
-  const [keyword, originalMsgId] = ctx.match[1].split('_');
-
+  const parts = ctx.match[1].split('_');
+  // Perbaikan: handling untuk keyword yang mungkin mengandung underscore
+  if (parts.length < 2) return ctx.reply('Invalid format');
+  
+  const msgId = parts.pop(); // Ambil ID pesan (elemen terakhir)
+  const keyword = parts.join('_'); // Gabungkan sisanya sebagai keyword
+  
   // Update pesan konfirmasi
   await ctx.editMessageText(`❌ Penghapusan filter "${keyword}" dibatalkan.`);
-
+  
   // Hapus pesan setelah 3 detik
   setTimeout(async () => {
     try {
       await ctx.deleteMessage();
-      await ctx.telegram.deleteMessage(ctx.chat.id, originalMsgId);
+      await ctx.telegram.deleteMessage(ctx.chat.id, msgId);
     } catch (error) {
       console.error('Error menghapus pesan:', error);
     }
@@ -413,6 +434,7 @@ bot.hears(/^!(.+)$/, async (ctx) => {
       for (const media of filter.media) {
         try {
           if (!fs.existsSync(media.localPath)) {
+            console.log(`File tidak ditemukan: ${media.localPath}`);
             continue;
           }
 
@@ -420,6 +442,11 @@ bot.hears(/^!(.+)$/, async (ctx) => {
           let options = {};
           if (filter.text) {
             options = { caption: filter.text };
+            
+            // Tambahkan entities jika ada
+            if (filter.entities && filter.entities.length > 0) {
+              options.caption_entities = filter.entities;
+            }
           }
 
           switch (media.type) {
@@ -441,6 +468,8 @@ bot.hears(/^!(.+)$/, async (ctx) => {
             case 'audio':
               await ctx.replyWithAudio({ source: media.localPath }, options);
               break;
+            default:
+              console.log(`Tipe media tidak dikenal: ${media.type}`);
           }
         } catch (error) {
           console.error(`Error mengirim media: ${error}`);
