@@ -36,7 +36,7 @@
 4. **Jalankan bot-nya, terus jangan lupa donasi lagi COK!**
 
    ```bash
-   node index.js
+   node bot.js
 
 
 ### 🥳 **Udah berhasil?**
