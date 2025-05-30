@@ -13,7 +13,357 @@ const config = {
   dataDir: './data',
   mediaDir: './media',
   dbFile: './data/database.json'
-};
+};require('dotenv').config();
+// Bot Telegram Multi-Admin dengan Sistem Filter dan Penyimpanan Media
+// Versi yang diperbaiki dengan koneksi yang lebih stabil
+
+const { Telegraf } = require('telegraf');
+const https = require('https');
+const dns = require('dns');
+const config = require('./config/bot-config');
+const database = require('./config/database');
+const logger = require('./utils/logger');
+const backupManager = require('./utils/backup-manager');
+const rateLimiter = require('./utils/rate-limiter');
+const adminCheck = require('./middleware/admin-check');
+const adminCommands = require('./handlers/admin-commands');
+const filterCommands = require('./handlers/filter-commands');
+const mediaHandler = require('./handlers/media-handler');
+
+require('dotenv').config();
+
+// Force IPv4 untuk koneksi yang lebih stabil
+dns.setDefaultResultOrder('ipv4first');
+
+class TelegramBot {
+    constructor() {
+        this.bot = null;
+        this.isRunning = false;
+        this.reconnectAttempts = 0;
+        this.maxReconnectAttempts = 10;
+        this.reconnectDelay = 5000;
+        
+        this.initBot();
+        this.setupHandlers();
+        this.setupGracefulShutdown();
+        
+        // Backup otomatis setiap 6 jam
+        setInterval(() => {
+            backupManager.createBackup();
+        }, 6 * 60 * 60 * 1000);
+        
+        // Cleanup file media yang tidak terpakai setiap 24 jam
+        setInterval(() => {
+            this.cleanupUnusedMedia();
+        }, 24 * 60 * 60 * 1000);
+    }
+
+    initBot() {
+        try {
+            // HTTPS Agent dengan IPv4 only untuk koneksi yang lebih stabil
+            const httpsAgent = new https.Agent({
+                family: 4, // Force IPv4
+                keepAlive: true,
+                timeout: 30000,
+                maxSockets: 15,
+                maxFreeSockets: 10
+            });
+
+            const botOptions = {
+                telegram: {
+                    agent: httpsAgent,
+                    webhookReply: false,
+                    apiRoot: 'https://api.telegram.org',
+                    timeout: 60000
+                },
+                handlerTimeout: 90000
+            };
+
+            this.bot = new Telegraf(config.token, botOptions);
+            logger.info('🤖 Bot Telegram siap diinisialisasi anjir... (IPv4-only mode)');
+        } catch (error) {
+            logger.error('❌ Gagal inisialisasi bot bangsat:', error);
+            throw error;
+        }
+    }
+
+    setupHandlers() {
+        // Middleware rate limiting
+        this.bot.use(rateLimiter.middleware);
+        
+        // Middleware admin check
+        this.bot.use(adminCheck);
+
+        // Error handler global
+        this.bot.catch((err, ctx) => {
+            logger.error(`❌ Error di handler ${ctx.updateType}:`, err);
+            
+            // Jangan reply jika chat tidak ada
+            if (ctx && ctx.reply) {
+                try {
+                    ctx.reply('🔥 Aduh anjir, ada error nih! Coba lagi bentar lagi ya cok!');
+                } catch (replyError) {
+                    logger.error('Gagal kirim pesan error:', replyError);
+                }
+            }
+        });
+
+        // Command handlers
+        this.setupBasicCommands();
+        this.setupAdminCommands();
+        this.setupFilterCommands();
+        this.setupMediaHandlers();
+    }
+
+    setupBasicCommands() {
+        // Start command - bisa dipakai semua orang
+        this.bot.start((ctx) => {
+            const userId = ctx.from.id.toString();
+            const firstName = ctx.from.first_name || 'Bro';
+            
+            if (config.admins.includes(userId)) {
+                ctx.reply(
+                    `🔥 Eh anjir ${firstName}! Selamat datang boss!\n\n` +
+                    `Lu admin di sini cok, bisa pake semua fitur.\n` +
+                    `Ketik /help buat liat semua command yang bisa dipake.\n\n` +
+                    `Bot ini udah siap tempur nih! 💪`
+                );
+            } else {
+                ctx.reply(
+                    `😏 Halo ${firstName}!\n\n` +
+                    `Bot ini khusus admin doang cok, lu gabisa pake.\n` +
+                    `Kalo mau jadi admin, minta sama boss gue ya! 😎`
+                );
+            }
+        });
+
+        // Help command
+        this.bot.command('help', (ctx) => {
+            const helpText = 
+                '🔥 COMMAND ADMIN ANJIR:\n\n' +
+                '👑 Kelola Admin:\n' +
+                '• /addadmin @username - Tambah admin baru cok\n' +
+                '• /removeadmin @username - Tendang admin\n' +
+                '• /listadmins - Liat semua admin\n\n' +
+                '🎯 Command Filter:\n\n' +
+                '• !add kata_kunci - Tambah filter baru\n' +
+                '• !del kata_kunci - Hapus filter\n' +
+                '• !list - Liat semua filter\n' +
+                '• !kata_kunci - Pake filter\n\n' +
+                '📁 Command Backup:\n\n' +
+                '• /backup - Backup database sekarang\n' +
+                '• /restore - Restore dari backup\n' +
+                '• /cleanup - Bersihin file sampah\n\n' +
+                '📊 Command Info:\n\n' +
+                '• /status - Status bot\n' +
+                '• /stats - Statistik penggunaan\n\n' +
+                'Cara bikin filter:\n' +
+                'Buat filter baru: ketik !add nama_filter terus reply ke pesan yang mau dijadiin filter. Bisa text aja atau ada media juga.\n\n' +
+                'Tips: Filter bisa nyimpen foto, video, dokumen, sama text sekaligus anjir! 🚀';
+
+            ctx.reply(helpText);
+        });
+
+        // Status command
+        this.bot.command('status', (ctx) => {
+            const uptime = process.uptime();
+            const hours = Math.floor(uptime / 3600);
+            const minutes = Math.floor((uptime % 3600) / 60);
+            const seconds = Math.floor(uptime % 60);
+            
+            const memUsage = process.memoryUsage();
+            const memMB = Math.round(memUsage.rss / 1024 / 1024);
+            
+            const filterCount = Object.keys(database.data.filters).length;
+            const mediaCount = Object.keys(database.data.media).length;
+            const adminCount = config.admins.length;
+
+            const statusText = 
+                '📊 STATUS BOT ANJIR:\n\n' +
+                `⏰ Uptime: ${hours}j ${minutes}m ${seconds}d\n` +
+                `💾 Memory: ${memMB} MB\n` +
+                `👑 Admin: ${adminCount} orang\n` +
+                `🎯 Filter: ${filterCount} buah\n` +
+                `📁 Media: ${mediaCount} file\n` +
+                `🔥 Status: ${this.isRunning ? 'Jalan' : 'Mati'}\n\n` +
+                `Bot lagi sehat wal afiat cok! 💪`;
+
+            ctx.reply(statusText);
+        });
+
+        // Stats command
+        this.bot.command('stats', (ctx) => {
+            const stats = rateLimiter.getStats();
+            const statsText = 
+                '📈 STATISTIK BOT:\n\n' +
+                `📨 Total Request: ${stats.totalRequests}\n` +
+                `🚫 Request Diblokir: ${stats.blockedRequests}\n` +
+                `⚡ Request/Menit: ${stats.requestsPerMinute}\n\n` +
+                `Last Reset: ${new Date(stats.lastReset).toLocaleString('id-ID')}`;
+
+            ctx.reply(statsText);
+        });
+    }
+
+    setupAdminCommands() {
+        adminCommands.register(this.bot);
+    }
+
+    setupFilterCommands() {
+        filterCommands.register(this.bot);
+    }
+
+    setupMediaHandlers() {
+        mediaHandler.register(this.bot);
+    }
+
+    async cleanupUnusedMedia() {
+        try {
+            logger.info('🧹 Mulai cleanup media yang ga kepake...');
+            
+            const usedFiles = new Set();
+            
+            // Ambil semua file yang dipake di filter
+            Object.values(database.data.filters).forEach(filter => {
+                if (filter.media && Array.isArray(filter.media)) {
+                    filter.media.forEach(media => {
+                        if (media.uuid) {
+                            usedFiles.add(media.uuid);
+                        }
+                    });
+                }
+            });
+
+            // Hapus file yang ga kepake
+            const mediaFiles = Object.keys(database.data.media);
+            let deletedCount = 0;
+
+            for (const uuid of mediaFiles) {
+                if (!usedFiles.has(uuid)) {
+                    const mediaInfo = database.data.media[uuid];
+                    if (mediaInfo && mediaInfo.localPath) {
+                        try {
+                            const fs = require('fs');
+                            if (fs.existsSync(mediaInfo.localPath)) {
+                                fs.unlinkSync(mediaInfo.localPath);
+                            }
+                            delete database.data.media[uuid];
+                            deletedCount++;
+                        } catch (error) {
+                            logger.error(`Gagal hapus file ${mediaInfo.localPath}:`, error);
+                        }
+                    }
+                }
+            }
+
+            if (deletedCount > 0) {
+                database.save();
+                logger.info(`✅ Cleanup selesai! Hapus ${deletedCount} file yang ga kepake.`);
+            } else {
+                logger.info('✅ Cleanup selesai! Ga ada file yang perlu dihapus.');
+            }
+        } catch (error) {
+            logger.error('❌ Error saat cleanup media:', error);
+        }
+    }
+
+    async connectWithRetry() {
+        while (this.reconnectAttempts < this.maxReconnectAttempts && !this.isRunning) {
+            try {
+                this.reconnectAttempts++;
+                logger.info(`🔄 Nyoba konek ke Telegram API... (Percobaan ${this.reconnectAttempts}/${this.maxReconnectAttempts})`);
+                
+                // Test koneksi dulu
+                const botInfo = await this.bot.telegram.getMe();
+                logger.info(`✅ Bot berhasil konek: @${botInfo.username}`);
+                
+                // Launch bot
+                await this.bot.launch({
+                    dropPendingUpdates: true
+                });
+                
+                this.isRunning = true;
+                this.reconnectAttempts = 0;
+                
+                logger.info('🚀 Bot udah jalan normal anjir! Siap tempur!');
+                return true;
+                
+            } catch (error) {
+                logger.error(`❌ Percobaan ${this.reconnectAttempts} gagal (IPv4 mode):`, error.message);
+                
+                if (this.reconnectAttempts < this.maxReconnectAttempts) {
+                    const delay = this.reconnectDelay * Math.pow(1.5, this.reconnectAttempts - 1);
+                    logger.info(`⏳ Tunggu ${delay/1000} detik sebelum coba lagi...`);
+                    await new Promise(resolve => setTimeout(resolve, delay));
+                } else {
+                    logger.error('💀 Udah coba berkali-kali tapi tetep gagal anjir! Coba cek koneksi internet atau token bot.');
+                }
+            }
+        }
+        
+        return false;
+    }
+
+    async start() {
+        try {
+            logger.info('🔥 Starting Telegram Bot...');
+            
+            // Load database
+            database.load();
+            
+            // Coba backup restore jika ada
+            await backupManager.autoRestore();
+            
+            // Connect dengan retry
+            const connected = await this.connectWithRetry();
+            
+            if (!connected) {
+                throw new Error('Gagal konek ke Telegram setelah beberapa percobaan');
+            }
+            
+        } catch (error) {
+            logger.error('💀 Gagal start bot:', error);
+            process.exit(1);
+        }
+    }
+
+    setupGracefulShutdown() {
+        const shutdown = async (signal) => {
+            logger.info(`📴 Terima signal ${signal}, shutdown dengan aman...`);
+            
+            this.isRunning = false;
+            
+            try {
+                // Backup database sebelum shutdown
+                await backupManager.createBackup();
+                
+                // Stop bot
+                if (this.bot) {
+                    await this.bot.stop(signal);
+                }
+                
+                logger.info('✅ Bot berhasil dimatikan dengan aman anjir!');
+                process.exit(0);
+            } catch (error) {
+                logger.error('❌ Error saat shutdown:', error);
+                process.exit(1);
+            }
+        };
+
+        process.once('SIGINT', () => shutdown('SIGINT'));
+        process.once('SIGTERM', () => shutdown('SIGTERM'));
+        process.once('SIGUSR2', () => shutdown('SIGUSR2')); // PM2 reload
+    }
+}
+
+// Start bot
+if (require.main === module) {
+    const bot = new TelegramBot();
+    bot.start();
+}
+
+module.exports = TelegramBot;
+
 
 // Buat direktori yang diperlukan
 if (!fs.existsSync(config.dataDir)) {
